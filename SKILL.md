@@ -56,19 +56,21 @@ python scripts/scrub.py --in /tmp/donate-trace/<session-file> --harness <harness
 
 The scrubber writes the cleaned session and a JSON report listing every redaction it made.
 
-### Step 3.5 — Deep secret scan (if available)
+### Step 3.5 — Deep secret scan (required)
 
-Run the optional deep scan over the cleaned file:
+Run the deep scan over the cleaned file:
 
 ```bash
 python scripts/scan.py --in /tmp/donate-trace/cleaned.jsonl --report /tmp/donate-trace/scan.json
 ```
 
-This wraps TruffleHog (hundreds of maintained detectors) for breadth beyond the scrubber's pattern list. Read the `STATUS:` line:
+This wraps TruffleHog (hundreds of maintained detectors) for breadth beyond the scrubber's pattern list. It is the last breadth check before a donation becomes public and permanent: the ingestion server re-runs its own deterministic redactor, but that covers only event content, structured payloads and human corrections, and it does not run TruffleHog. Nothing downstream will catch what this misses.
 
-- **`trufflehog_not_installed`** — don't block and don't auto-install. Note it for the Step 5 summary so the user knows the deep scan didn't run locally. (The anonymous donation path runs it server-side; the attributed path does **not**, so for attributed donations either suggest installing TruffleHog with the one-liner the script prints, or proceed knowing only the pattern pass ran.)
-- **`findings`** — treat each as a **must-confirm item** in the review pass below: it may be a real secret the scrubber missed, or a false positive on a high-entropy string (hash, ID, base64). Resolve each with the user before uploading. These do not auto-block — TruffleHog runs without verification, so judgment is required.
-- **`clean`** / **`scan_error`** — proceed; mention a scan error in the summary if it occurred.
+Branch on the exit code (the `STATUS:` line explains it):
+
+- **exit 0 (`clean`)** — proceed to the review pass.
+- **exit 2 (`findings`)** — **stop and resolve before uploading.** Each finding is either a real secret the scrubber missed or a false positive on a high-entropy string (hash, id, base64). TruffleHog runs without verification, so a human decides; do not auto-proceed, and do not upload with an unresolved finding.
+- **exit 3 (`trufflehog_not_installed` / `scan_error`)** — the breadth check did **not** run. Suggest the one-line install the script prints and re-run, or retry the scan. Do not upload unattended on the pattern pass alone; if the user chooses to proceed anyway, say plainly in the Step 5 summary that no breadth scan ran.
 
 ### Step 4 — Review pass (your judgment)
 
@@ -95,8 +97,9 @@ Removed:
 - 2 email addresses
 - 1 company name in a commit message ("Acme")
 
-Deep scan: TruffleHog clean.   (or: "not installed — pattern pass only";
-or: "flagged 1 'Box' match, you confirmed it's a hash, not a secret")
+Deep scan: TruffleHog clean.   (or: "DID NOT RUN — TruffleHog not installed,
+so no breadth scan backed up the pattern pass"; or: "flagged 1 'Box' match,
+you confirmed it's a hash, not a secret")
 
 The cleaned session has 35 messages and 12 tool calls. Nothing has been
 uploaded yet.

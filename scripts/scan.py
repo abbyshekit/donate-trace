@@ -1,35 +1,55 @@
 #!/usr/bin/env python3
 """
-scan.py — optional deep secret scan for Trace Commons donations.
+scan.py — deep secret scan for Trace Commons donations.
 
-The deterministic scrubber (scrub.py) is a fast, high-confidence first pass with
-a hand-maintained pattern list. This wraps TruffleHog (hundreds of maintained
-detectors) for breadth — the same scanner the ingestion server runs as a
-backstop. It is deliberately OPTIONAL:
+The deterministic scrubber (scrub.py) is a fast first pass with a
+hand-maintained pattern list plus a cue-gated entropy pass. This wraps
+TruffleHog (hundreds of maintained detectors) for breadth.
 
-  - If `trufflehog` is not installed, this prints a notice and exits cleanly.
-    Nothing is required; the donation can still proceed on the scrub.py pass
-    plus the human review. (The anonymous donation path also re-scans server
-    side; attributed donations do not, which is exactly why running this
-    locally is worthwhile.)
-  - If it is installed, findings are reported for the review pass to confirm.
-    They are NOT a hard block: TruffleHog runs WITHOUT verification (so no
-    candidate secret is ever sent to a third party), which means it can
-    false-positive on high-entropy strings (hashes, IDs, base64). Treat each
-    finding as "confirm this isn't a real secret before uploading."
+This scan is a REQUIRED gate, not an advisory step, because there is no
+breadth scanner behind it. The ingestion server re-runs its own deterministic
+redactor over submitted envelopes, but that redactor covers only event
+content, structured payloads and the human-correction field, and it does not
+run TruffleHog. Once a donation is merged it is public and permanent, so the
+last place a missed secret can be caught is here, locally, before upload.
 
-This mirrors the server's behaviour and flags; keep the two in sync.
+TruffleHog runs WITHOUT verification, so no candidate secret is ever sent to a
+third party. The cost of that is false positives on high-entropy strings
+(hashes, ids, base64): a finding means "confirm this is not a real secret",
+not "this is definitely a secret". Confirming is a human step; proceeding
+without confirming is not.
 
 Usage:
   python scan.py --in cleaned.jsonl [--report report.json]
 
-Exit code is always 0 — this is advisory, not a gate. Read the STATUS line.
+Exit codes:
+  0  clean — no findings; safe to continue the donation flow
+  2  findings — a human must confirm each before upload; do not auto-proceed
+  3  unavailable — TruffleHog missing, or the scan errored/timed out; the
+     breadth check did NOT run, so the donation must not proceed unattended
+ 64  usage error — bad arguments (argparse). Distinct from 2 on purpose: a
+     caller must never read "you typed the flags wrong" as "no secrets found",
+     nor the reverse. argparse exits 2 by default, which would collide.
 """
 
 import json
 import shutil
 import argparse
 import subprocess
+import sys
+
+EXIT_CLEAN = 0
+EXIT_FINDINGS = 2
+EXIT_UNAVAILABLE = 3
+EXIT_USAGE = 64  # sysexits.h EX_USAGE; keeps argparse off the findings code
+
+
+class _ScanArgumentParser(argparse.ArgumentParser):
+    """argparse exits 2 on usage errors, which is this tool's findings code."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
 
 
 INSTALL_HINT = (
@@ -58,6 +78,12 @@ def scan(path):
         return "error", []
 
     findings = []
+    # A failed scan must never read as a clean one. Without this, a mistyped
+    # --in path, an unreadable file or a killed process produces no stdout,
+    # falls through to "clean", and exits 0 -- turning "we did not check" into
+    # "we checked and it is safe", which is worse than not running at all.
+    if proc.returncode != 0 and not proc.stdout.strip():
+        return "error", []
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -83,7 +109,7 @@ def scan(path):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = _ScanArgumentParser()
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--report", default=None)
     args = ap.parse_args()
@@ -91,20 +117,26 @@ def main():
     status, findings = scan(args.inp)
 
     if status == "not_installed":
+        exit_code = EXIT_UNAVAILABLE
         print("STATUS: trufflehog_not_installed")
-        print("Deep scan skipped — TruffleHog is not installed, so this donation")
-        print("was checked by the pattern-based pass (scrub.py) only.")
-        print("Anonymous donations are deep-scanned server-side; attributed ones")
-        print("are not, so installing TruffleHog is worthwhile for attributed PRs.")
+        print("The breadth scan did NOT run. Nothing behind this step re-scans the")
+        print("donation: the server's redactor covers only event content, structured")
+        print("payloads and human corrections, and does not run TruffleHog.")
+        print("Install it and re-run before uploading.")
         print(INSTALL_HINT)
     elif status == "error":
+        exit_code = EXIT_UNAVAILABLE
         print("STATUS: scan_error")
-        print("TruffleHog is installed but the scan did not complete (timeout or")
-        print("execution error). Proceed on the scrub.py pass + review, or retry.")
+        print("TruffleHog is installed but the scan did not complete (timeout,")
+        print("execution error, or a non-zero exit with no results -- check the")
+        print("--in path), so the breadth check did NOT run. Retry before")
+        print("uploading; do not proceed on the scrub.py pass alone.")
     elif status == "clean":
+        exit_code = EXIT_CLEAN
         print("STATUS: clean")
         print("TruffleHog found no secrets in the cleaned trace.")
     else:  # findings
+        exit_code = EXIT_FINDINGS
         detectors = sorted({f["detector"] for f in findings})
         print(f"STATUS: findings ({len(findings)})")
         print("Detectors: " + ", ".join(detectors))
@@ -117,6 +149,8 @@ def main():
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:
             json.dump({"status": status, "findings": findings}, f, indent=2)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
