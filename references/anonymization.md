@@ -5,9 +5,12 @@ Two passes. The scrubber (`scripts/scrub.py`) does pass one deterministically. Y
 ## Pass one — what the scrubber already handles
 - Home-directory paths on Mac, Linux, and Windows → username replaced with `USER`
 - Secret formats: AWS keys, GitHub/OpenAI/Anthropic/Slack/Google keys, JWTs, PEM private-key blocks, bearer tokens, database connection strings, and `KEY=value` env assignments where the key name implies a secret
-- Email addresses
+- Unknown-provider and ad hoc tokens, via a cue-gated entropy pass: a high-entropy string is redacted when a secret cue (`api_key:`, `Bearer `, `password=`, `token=` …) appears just before it. Structural identifiers (UUIDs, `msg_`/`toolu_`/`req_` ids, git SHAs, content hashes) are allowlisted, so they survive.
+- Email addresses and private/internal IPv4 addresses
 
 You do not need to redo these. Trust the report it produces.
+
+Note the limit of the cue gate: a secret with no cue near it (a bare token pasted on its own line, an unusual key name the cue list does not know) is invisible to pass one. That is a pass-two job, and it is why the local `scan.py` breadth scan is required rather than optional.
 
 ## Pass two — what you must check by reading
 The scrubber recognizes patterns; it cannot recognize meaning. Read the cleaned session and look for:
@@ -17,6 +20,8 @@ The scrubber recognizes patterns; it cannot recognize meaning. Read the cleaned 
 - **Company / client / customer names**. Replace with `[COMPANY]`.
 - **Internal hostnames and URLs** (`*.internal`, `*.local`, private IPs, intranet links). Replace with `[INTERNAL_URL]`.
 - **Project codenames and ticket IDs** that identify a specific org (e.g. `JIRA-1234`, internal project names). Replace with `[REF]` if identifying.
+- **Dates of birth and other identity-document details**. A DOB in prose (`born 2024-06-25`, `DOB 25/06/2024`, `turns 3 in June`) has no pattern the scrubber can safely key on, and combined with a name and a location it is a re-identification kit. Replace with `[DOB]`, or drop the sentence. The same applies to passport, SSN/NI, driver-licence and national-ID numbers if a session ever touched them.
+- **Confidentiality and privilege markers, and the text they mark**. `attorney-client privileged`, `work product`, `subject to NDA`, `confidential — do not distribute`, `internal only`. Two reasons to stop when you see one. The marked material is by definition not yours to publish, and the marker itself signals the surrounding text is sensitive even where the specifics look mundane. Do not merely delete the marker and keep the body: remove both, or drop the session.
 - **Anything else that could identify the author or their employer** — physical addresses, phone numbers the scrubber missed, unusual usernames in prose.
 
 ## Where to look per harness
